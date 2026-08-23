@@ -34,20 +34,9 @@ log "seed=$SEED resume=$RESUME_STEP total=$TOTAL_STEPS save_freq=$SAVE_FREQ"
 log "код: $app"
 nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader || true
 
-# --- 1. окружение ---------------------------------------------------------
-python3 - <<'PY'
-import sys
-try:
-    import torch, vllm
-except Exception as e:
-    sys.exit(f"окружение не готово: {e}; запустить без --no-pip")
-assert torch.__version__.startswith("2.6.0"), f"нужен torch 2.6.0, есть {torch.__version__}"
-assert vllm.__version__ == "0.8.5", f"нужен vllm 0.8.5, есть {vllm.__version__}"
-assert torch.cuda.is_available(), "CUDA недоступна"
-print(f"ок: torch {torch.__version__}, vllm {vllm.__version__}, {torch.cuda.get_device_name(0)}")
-PY
-
-# --- 2. закреплённые данные ----------------------------------------------
+# --- 1. закреплённые данные ----------------------------------------------
+# Гейт стоит ПЕРВЫМ сознательно: он не требует torch и vllm, поэтому задание,
+# запущенное с --no-pip, всё равно проверяет клон, точку входа и целостность данных.
 # Файлы лежат в репозитории, потому что fisher_prompt_indices ссылается на строки
 # именно этих parquet, и пересоздать их из исходного датасета нельзя.
 DATA_ROOT="$app/data/gsm8k"
@@ -61,6 +50,19 @@ for name, md5 in want.items():
     got = hashlib.md5(p.read_bytes()).hexdigest()
     assert got == md5, f"{name}: md5 {got} вместо {md5}, данные не те"
     print(f"{name}: md5 совпал")
+PY
+
+# --- 2. окружение ---------------------------------------------------------
+python3 - <<'PY'
+import sys
+try:
+    import torch, vllm
+except Exception as e:
+    sys.exit(f"окружение не готово: {e}; запустить без --no-pip")
+assert torch.__version__.startswith("2.6.0"), f"нужен torch 2.6.0, есть {torch.__version__}"
+assert vllm.__version__ == "0.8.5", f"нужен vllm 0.8.5, есть {vllm.__version__}"
+assert torch.cuda.is_available(), "CUDA недоступна"
+print(f"ок: torch {torch.__version__}, vllm {vllm.__version__}, {torch.cuda.get_device_name(0)}")
 PY
 
 # --- 3. модель ------------------------------------------------------------
