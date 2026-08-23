@@ -1,0 +1,4 @@
+peak_memory_used_mib=116017
+baseline_memory_used_mib=86195
+peak_device_delta_memory_used_mib=29822
+peak_own_memory_used_mib=29792

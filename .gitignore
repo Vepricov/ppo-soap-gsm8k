@@ -1,0 +1,14 @@
+# Артефакты прогонов: в репозиторий не попадают, живут на GPU-хосте и на общем томе очереди.
+*.log
+*.pyc
+__pycache__/
+.venv/
+venv/
+*.pt
+*.safetensors
+*.bin
+checkpoints/
+results/
+outputs/
+metrics.jsonl
+*.status

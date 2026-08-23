@@ -1,0 +1,212 @@
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+from collections.abc import Iterable, MutableMapping
+import math
+
+import torch
+from torch import Tensor
+from torch.optim import Optimizer
+
+
+class _RoutedOptimizerState(MutableMapping):
+    def __init__(self, muon_state, auxiliary_state, muon_parameters):
+        self._muon_state = muon_state
+        self._auxiliary_state = auxiliary_state
+        self._muon_parameters = set(muon_parameters)
+
+    def _state_for(self, parameter):
+        return self._muon_state if parameter in self._muon_parameters else self._auxiliary_state
+
+    def __getitem__(self, parameter):
+        return self._state_for(parameter)[parameter]
+
+    def __setitem__(self, parameter, value):
+        self._state_for(parameter)[parameter] = value
+
+    def __delitem__(self, parameter):
+        del self._state_for(parameter)[parameter]
+
+    def __iter__(self):
+        yield from self._muon_state
+        yield from self._auxiliary_state
+
+    def __len__(self):
+        return len(self._muon_state) + len(self._auxiliary_state)
+
+
+def _zeropower_via_newton_schulz(gradient: Tensor, ns_steps: int, eps: float) -> Tensor:
+    if gradient.ndim != 2:
+        raise ValueError("Muon only supports two-dimensional gradients")
+    # Match torch.optim.Muon: Newton-Schulz is intentionally evaluated in
+    # bfloat16 on every device, including the CPU reference path.
+    update = gradient.bfloat16()
+    transposed = update.size(0) > update.size(1)
+    if transposed:
+        update = update.T
+    update.div_(update.norm() + eps)
+    for _ in range(ns_steps):
+        gram = update @ update.T
+        gram_update = torch.addmm(gram, gram, gram, beta=-4.775, alpha=2.0315)
+        update = torch.addmm(update, gram_update, update, beta=3.4445)
+    return update.T if transposed else update
+
+
+class Muon(Optimizer):
+    """PyTorch-compatible Muon backport for runtimes older than PyTorch 2.9."""
+
+    def __init__(
+        self,
+        params,
+        lr: float,
+        weight_decay: float,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_steps: int = 5,
+        adjust_lr_fn: str = "match_rms_adamw",
+        eps: float = 1e-7,
+    ):
+        if adjust_lr_fn not in ("original", "match_rms_adamw"):
+            raise ValueError(f"Unsupported Muon learning-rate adjustment: {adjust_lr_fn}")
+        defaults = {
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "momentum": momentum,
+            "nesterov": nesterov,
+            "ns_steps": ns_steps,
+            "adjust_lr_fn": adjust_lr_fn,
+            "eps": eps,
+        }
+        super().__init__(params, defaults)
+        for group in self.param_groups:
+            for parameter in group["params"]:
+                if parameter.ndim != 2:
+                    raise ValueError(f"Muon only supports 2D parameters, got {tuple(parameter.shape)}")
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            for parameter in group["params"]:
+                if parameter.grad is None:
+                    continue
+                gradient = parameter.grad
+                if gradient.is_sparse:
+                    raise RuntimeError("Muon does not support sparse gradients")
+                state = self.state[parameter]
+                if "momentum_buffer" not in state:
+                    state["momentum_buffer"] = torch.zeros_like(gradient)
+                momentum_buffer = state["momentum_buffer"]
+                momentum_buffer.lerp_(gradient, 1 - group["momentum"])
+                update = (
+                    gradient.lerp(momentum_buffer, group["momentum"])
+                    if group["nesterov"]
+                    else momentum_buffer
+                )
+                update = _zeropower_via_newton_schulz(update, group["ns_steps"], group["eps"])
+                rows, columns = parameter.shape
+                if group["adjust_lr_fn"] == "match_rms_adamw":
+                    adjusted_lr = group["lr"] * 0.2 * math.sqrt(max(rows, columns))
+                else:
+                    adjusted_lr = group["lr"] * math.sqrt(max(1, rows / columns))
+                parameter.mul_(1 - group["lr"] * group["weight_decay"])
+                parameter.add_(update, alpha=-adjusted_lr)
+        return loss
+
+
+class MuonWithAuxAdamW(Optimizer):
+    """Muon for hidden matrices and AdamW for all auxiliary parameters."""
+
+    requires_named_parameters = True
+
+    def __init__(
+        self,
+        named_parameters: Iterable[tuple[str, Tensor]],
+        lr: float,
+        weight_decay: float,
+        betas: tuple[float, float] = (0.9, 0.999),
+        muon_lr: float | None = None,
+        muon_weight_decay: float | None = None,
+        muon_momentum: float = 0.95,
+        muon_nesterov: bool = True,
+        muon_ns_steps: int = 5,
+        muon_adjust_lr_fn: str = "match_rms_adamw",
+        auxiliary_lr: float | None = None,
+        auxiliary_weight_decay: float | None = None,
+        auxiliary_eps: float = 1e-8,
+    ):
+        from verl.workers.config.optimizer import partition_named_parameters_for_muon
+
+        named_parameters = list(named_parameters)
+        muon_named, auxiliary_named = partition_named_parameters_for_muon(named_parameters)
+        if not muon_named or not auxiliary_named:
+            raise ValueError("MuonWithAuxAdamW requires non-empty Muon and auxiliary parameter partitions")
+
+        all_parameters = [parameter for _, parameter in named_parameters]
+        super().__init__(all_parameters, {"lr": lr})
+
+        muon_cls = getattr(torch.optim, "Muon", Muon)
+        self.muon = muon_cls(
+            [parameter for _, parameter in muon_named],
+            lr=muon_lr if muon_lr is not None else lr,
+            weight_decay=muon_weight_decay if muon_weight_decay is not None else weight_decay,
+            momentum=muon_momentum,
+            nesterov=muon_nesterov,
+            ns_steps=muon_ns_steps,
+            adjust_lr_fn=muon_adjust_lr_fn,
+        )
+        self.auxiliary = torch.optim.AdamW(
+            [parameter for _, parameter in auxiliary_named],
+            lr=auxiliary_lr if auxiliary_lr is not None else lr,
+            weight_decay=auxiliary_weight_decay if auxiliary_weight_decay is not None else weight_decay,
+            betas=betas,
+            eps=auxiliary_eps,
+        )
+
+        self.param_groups = self.muon.param_groups + self.auxiliary.param_groups
+        self.state = _RoutedOptimizerState(
+            self.muon.state,
+            self.auxiliary.state,
+            (parameter for _, parameter in muon_named),
+        )
+        self.parameter_routes = {
+            "muon": tuple(name for name, _ in muon_named),
+            "auxiliary_adamw": tuple(name for name, _ in auxiliary_named),
+        }
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = self.muon.step(closure)
+        self.auxiliary.step()
+        return loss
+
+    def zero_grad(self, set_to_none: bool = True):
+        self.muon.zero_grad(set_to_none=set_to_none)
+        self.auxiliary.zero_grad(set_to_none=set_to_none)
+
+    def state_dict(self):
+        return {
+            "muon": self.muon.state_dict(),
+            "auxiliary_adamw": self.auxiliary.state_dict(),
+            "parameter_routes": self.parameter_routes,
+        }
+
+    def load_state_dict(self, state_dict):
+        if state_dict.get("parameter_routes") != self.parameter_routes:
+            raise ValueError("Optimizer parameter routing differs from the checkpoint")
+        self.muon.load_state_dict(state_dict["muon"])
+        self.auxiliary.load_state_dict(state_dict["auxiliary_adamw"])
+        self.param_groups = self.muon.param_groups + self.auxiliary.param_groups
+        self.state = _RoutedOptimizerState(
+            self.muon.state,
+            self.auxiliary.state,
+            self.muon.param_groups[0]["params"],
+        )

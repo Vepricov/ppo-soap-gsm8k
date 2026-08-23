@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# PPO on GSM8K with role-conditioned AdamW/Muon optimizer routing.
+
+set -euo pipefail
+
+ROUTE=${ROUTE:?Set ROUTE to adam_adam, muon_actor, or muon_critic}
+SEED=${SEED:?Set SEED to the paired run seed}
+MODEL_PATH=${MODEL_PATH:?Set MODEL_PATH to the pinned local model snapshot}
+DATA_ROOT=${DATA_ROOT:?Set DATA_ROOT to the prepared GSM8K directory}
+OUTPUT_ROOT=${OUTPUT_ROOT:?Set OUTPUT_ROOT to a persistent output directory}
+
+case "$ROUTE" in
+    adam_adam)
+        ACTOR_OPT=AdamW
+        ACTOR_OPT_IMPL=torch.optim
+        ACTOR_OPT_OVERRIDE=null
+        CRITIC_OPT=AdamW
+        CRITIC_OPT_IMPL=torch.optim
+        CRITIC_OPT_OVERRIDE=null
+        ;;
+    muon_actor)
+        ACTOR_OPT=MuonWithAuxAdamW
+        ACTOR_OPT_IMPL=verl.utils.optimizers
+        ACTOR_OPT_OVERRIDE='{muon_adjust_lr_fn: match_rms_adamw}'
+        CRITIC_OPT=AdamW
+        CRITIC_OPT_IMPL=torch.optim
+        CRITIC_OPT_OVERRIDE=null
+        ;;
+    muon_critic)
+        ACTOR_OPT=AdamW
+        ACTOR_OPT_IMPL=torch.optim
+        ACTOR_OPT_OVERRIDE=null
+        CRITIC_OPT=MuonWithAuxAdamW
+        CRITIC_OPT_IMPL=verl.utils.optimizers
+        CRITIC_OPT_OVERRIDE='{muon_adjust_lr_fn: match_rms_adamw}'
+        ;;
+    *)
+        echo "Unsupported ROUTE=$ROUTE" >&2
+        exit 2
+        ;;
+esac
+
+RUN_NAME="qwen2.5-0.5b_gsm8k_ppo_${ROUTE}_seed${SEED}"
+RUN_DIR="$OUTPUT_ROOT/$RUN_NAME"
+mkdir -p "$RUN_DIR"
+export VERL_FILE_LOGGER_PATH="$RUN_DIR/metrics.jsonl"
+
+python3 -m verl.trainer.main_ppo \
+    algorithm.adv_estimator=gae \
+    algorithm.kl_ctrl.type=fixed \
+    algorithm.kl_ctrl.kl_coef=0.001 \
+    data.train_files="$DATA_ROOT/train.parquet" \
+    data.val_files="$DATA_ROOT/test.parquet" \
+    data.train_batch_size=256 \
+    data.max_prompt_length=512 \
+    data.max_response_length=256 \
+    data.filter_overlong_prompts=True \
+    data.truncation=error \
+    data.seed="$SEED" \
+    actor_rollout_ref.model.path="$MODEL_PATH" \
+    actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.actor.optim.optimizer="$ACTOR_OPT" \
+    actor_rollout_ref.actor.optim.optimizer_impl="$ACTOR_OPT_IMPL" \
+    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.weight_decay=0.01 \
+    actor_rollout_ref.actor.optim.override_optimizer_config="$ACTOR_OPT_OVERRIDE" \
+    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
+    actor_rollout_ref.actor.data_loader_seed="$SEED" \
+    actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
+    actor_rollout_ref.actor.fsdp_config.seed="$SEED" \
+    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
+    actor_rollout_ref.rollout.n=1 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
+    critic.model.path="$MODEL_PATH" \
+    critic.model.use_remove_padding=True \
+    critic.model.enable_gradient_checkpointing=True \
+    critic.optim.optimizer="$CRITIC_OPT" \
+    critic.optim.optimizer_impl="$CRITIC_OPT_IMPL" \
+    critic.optim.lr=1e-5 \
+    critic.optim.weight_decay=0.01 \
+    critic.optim.override_optimizer_config="$CRITIC_OPT_OVERRIDE" \
+    critic.ppo_mini_batch_size=64 \
+    critic.ppo_micro_batch_size_per_gpu=4 \
+    critic.data_loader_seed="$SEED" \
+    critic.fsdp.use_orig_params=True \
+    critic.fsdp.seed="$SEED" \
+    trainer.logger='[console,file]' \
+    trainer.project_name=rl_muon_gsm8k \
+    trainer.experiment_name="$RUN_NAME" \
+    trainer.default_local_dir="$RUN_DIR/checkpoints" \
+    trainer.n_gpus_per_node=1 \
+    trainer.nnodes=1 \
+    trainer.save_freq=50 \
+    trainer.test_freq=10 \
+    trainer.total_epochs=15 \
+    "$@" 2>&1 | tee "$RUN_DIR/train.log"
