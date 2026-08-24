@@ -1,4 +1,4 @@
-# Точный снимок рабочего окружения кампании с vv_h200 (venv campaign-4cdf62757063).
+# Exact snapshot of the working training environment (pip freeze, not hand-written).
 # Снят через pip freeze, не собран вручную: очередь Cloud.ru ставит это в
 # PYTHONUSERBASE=/home/jovyan/.local-default, который лежит на постоянном томе,
 # поэтому установка нужна один раз, дальше запускать с --no-pip.

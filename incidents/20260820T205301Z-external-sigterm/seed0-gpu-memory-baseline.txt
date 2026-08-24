@@ -1,2 +1,0 @@
-gpu_uuid=GPU-bbba09e7-ef87-452c-7d34-cb2a03510f2c
-baseline_gpu_used_mib=99930
