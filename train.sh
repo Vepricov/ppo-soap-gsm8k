@@ -16,6 +16,8 @@ RESUME_STEP=${RESUME_STEP:-300}
 TOTAL_STEPS=${TOTAL_STEPS:-435}
 SAVE_FREQ=${SAVE_FREQ:-5}
 CKPT_REPO=${CKPT_REPO:?CKPT_REPO обязателен: HF repo id с чекпоинтами}
+ACTOR_OPTIMIZER=${ACTOR_OPTIMIZER:-KLMatchedSOAP}
+ACTOR_OPTIMIZER_IMPL=${ACTOR_OPTIMIZER_IMPL:-verl.utils.kl_matched_soap}
 MODEL_REPO=${MODEL_REPO:-Qwen/Qwen2.5-0.5B-Instruct}
 # Ревизия закреплена: она снята с фактически использованной копии модели кампании
 # (.cache/huggingface/download/*.metadata). Без пина задача может получить другие
@@ -30,7 +32,7 @@ out="$work/out"
 mkdir -p "$work" "$out"
 log() { printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
-log "seed=$SEED resume=$RESUME_STEP total=$TOTAL_STEPS save_freq=$SAVE_FREQ"
+log "seed=$SEED resume=$RESUME_STEP total=$TOTAL_STEPS save_freq=$SAVE_FREQ actor_optimizer=$ACTOR_OPTIMIZER"
 log "код: $app"
 nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader || true
 

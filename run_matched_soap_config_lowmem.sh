@@ -34,7 +34,11 @@ if [[ "$ACTOR_OPTIMIZER" == "KLMatchedSOAPThenAdamW" ]]; then
     OPTIMIZER_UPDATES_PER_GLOBAL_STEP=${OPTIMIZER_UPDATES_PER_GLOBAL_STEP:-4}
     HYBRID_OVERRIDE=", switch_after_global_step: $SWITCH_AFTER_GLOBAL_STEP, optimizer_updates_per_global_step: $OPTIMIZER_UPDATES_PER_GLOBAL_STEP"
 fi
-ACTOR_OPTIMIZER_OVERRIDE="{eps: 1e-5, soap_precondition_frequency: 10, soap_max_precond_dim: $SOAP_MAX_PRECOND_DIM, auxiliary_eps: 1e-5, alpha_min: $ALPHA_MIN, alpha_max: $ALPHA_MAX, alpha_clamp: $ALPHA_CLAMP, fisher_dataset_path: '$DATA_ROOT/test.parquet', fisher_prompt_indices: $FISHER_PROMPT_INDICES, fisher_micro_batch_size: $FISHER_MICRO_BATCH_SIZE, fisher_probe_count: $FISHER_PROBE_COUNT, fisher_probe_seed: $FISHER_PROBE_SEED, fisher_expected_states: $FISHER_EXPECTED_STATES, fisher_factor_rank: $FISHER_FACTOR_RANK, fisher_dense_threshold: $FISHER_DENSE_THRESHOLD, fisher_refresh_frequency: $FISHER_REFRESH_FREQUENCY$HYBRID_OVERRIDE}"
+if [[ "$ACTOR_OPTIMIZER" == "AdamW" && "$ACTOR_OPTIMIZER_IMPL" == "torch.optim" ]]; then
+    ACTOR_OPTIMIZER_OVERRIDE="{eps: 1e-5}"
+else
+    ACTOR_OPTIMIZER_OVERRIDE="{eps: 1e-5, soap_precondition_frequency: 10, soap_max_precond_dim: $SOAP_MAX_PRECOND_DIM, auxiliary_eps: 1e-5, alpha_min: $ALPHA_MIN, alpha_max: $ALPHA_MAX, alpha_clamp: $ALPHA_CLAMP, fisher_dataset_path: '$DATA_ROOT/test.parquet', fisher_prompt_indices: $FISHER_PROMPT_INDICES, fisher_micro_batch_size: $FISHER_MICRO_BATCH_SIZE, fisher_probe_count: $FISHER_PROBE_COUNT, fisher_probe_seed: $FISHER_PROBE_SEED, fisher_expected_states: $FISHER_EXPECTED_STATES, fisher_factor_rank: $FISHER_FACTOR_RANK, fisher_dense_threshold: $FISHER_DENSE_THRESHOLD, fisher_refresh_frequency: $FISHER_REFRESH_FREQUENCY$HYBRID_OVERRIDE}"
+fi
 RUN_NAME=${RUN_NAME:-qwen2.5-0.5b_gsm8k_ppo_kl_matched_soap_seed$SEED}
 RUN_DIR=$OUTPUT_ROOT/$RUN_NAME
 TERMINAL_ACTOR_CHECKPOINT=$RUN_DIR/checkpoints/global_step_$EXPECTED_STEP/actor/model_world_size_1_rank_0.pt
@@ -295,6 +299,6 @@ if [[ -n "${H_RLM_008_FROZEN_CAPTURE_ROOT:-}" ]]; then
 fi
 
 [[ -f "$TERMINAL_ACTOR_CHECKPOINT" ]] || {
-    echo "Terminal KL-matched SOAP actor checkpoint is missing: $TERMINAL_ACTOR_CHECKPOINT" >&2
+    echo "Terminal actor checkpoint is missing: $TERMINAL_ACTOR_CHECKPOINT" >&2
     exit 70
 }
